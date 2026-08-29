@@ -22,14 +22,19 @@ export SAVE_FREQ="${SAVE_FREQ:-1}"
 export TEST_FREQ="${TEST_FREQ:-1}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-False}"
 export EXP_NAME="${EXP_NAME:-tau2_telecom_3080_smoke}"
+export TAU2_SOLO_MODE="${TAU2_SOLO_MODE:-true}"
+export STUDENT_GPUS_PER_NODE="${STUDENT_GPUS_PER_NODE:-1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TAU2_TRAIN_PATH="${TAU2_TRAIN_PATH:-$SCRIPT_DIR/../../data/tau2_telecom_smoke/train.parquet}"
 export TAU2_VAL_PATH="${TAU2_VAL_PATH:-$SCRIPT_DIR/../../data/tau2_telecom_smoke/test.parquet}"
 
 SCRIPT_PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-"$PYTHON_BIN" "$SCRIPT_PROJECT_DIR/scripts/check_pi_tau_environment.py" \
-  --student "$STUDENT_MODEL" \
-  --teacher "$TEACHER_MODEL"
+CHECK_ARGS=(--student "$STUDENT_MODEL" --teacher "$TEACHER_MODEL")
+if [[ "${TAU2_SOLO_MODE,,}" == "true" || "${TAU2_SOLO_MODE}" == "1" ]]; then
+  CHECK_ARGS+=(--skip_user_simulator)
+fi
+"$PYTHON_BIN" "$SCRIPT_PROJECT_DIR/scripts/check_pi_tau_environment.py" "${CHECK_ARGS[@]}"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   GPU_COUNT="$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d ' ')"

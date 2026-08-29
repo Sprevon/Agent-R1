@@ -3,7 +3,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 ROLLOUT_N="${TAU2_GIGPO_ROLLOUT_N:-4}"
 
 exec "$PYTHON_BIN" -m agent_r1.trainer.main_agent_ppo \
@@ -21,7 +21,7 @@ exec "$PYTHON_BIN" -m agent_r1.trainer.main_agent_ppo \
   actor_rollout_ref.actor.checkpoint.save_contents='["model","optimizer","extra","hf_model"]' \
   trainer.project_name="${PROJECT_NAME:-TAU2_TELECOM_GIGPO}" \
   trainer.experiment_name="${EXP_NAME:-qwen3_0p6b_gigpo}" \
-  trainer.n_gpus_per_node="${STUDENT_GPUS_PER_NODE:-2}" \
+  trainer.n_gpus_per_node="${STUDENT_GPUS_PER_NODE:-1}" \
   trainer.val_before_train="${VAL_BEFORE_TRAIN:-False}" \
   trainer.save_freq="${SAVE_FREQ:-10}" \
   trainer.test_freq="${TEST_FREQ:-10}" \

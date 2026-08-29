@@ -48,6 +48,45 @@ def _read_schema_candidate(tool: Any, name: str) -> Any:
     return candidate
 
 
+def _task_message(task: Any) -> str:
+    """Build the single-turn task message used in solo_mode."""
+    if task is None:
+        return ""
+    scenario = getattr(task, "user_scenario", None)
+    if scenario is None and isinstance(task, Mapping):
+        scenario = task.get("user_scenario")
+    if scenario is None:
+        return ""
+    if not isinstance(scenario, Mapping):
+        return str(scenario).strip()
+
+    parts: list[str] = []
+    persona = scenario.get("persona")
+    if persona:
+        parts.append(str(persona).strip())
+    instructions = scenario.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        parts.append(instructions.strip())
+    elif isinstance(instructions, Mapping):
+        for key in ("reason_for_call", "known_info", "task_instructions"):
+            value = instructions.get(key)
+            if value:
+                parts.append(str(value).strip())
+    elif instructions is not None:
+        parts.append(str(instructions).strip())
+    return "\n\n".join(part for part in parts if part)
+
+
+def _solo_mode_action(text: str) -> str:
+    """Map non-tool text to tau2's `done` tool so DummyUser is never invoked."""
+    stripped = text.strip()
+    if not stripped:
+        return json.dumps({"name": "done", "arguments": {}})
+    if stripped.startswith("{") or stripped.startswith("done("):
+        return text
+    return json.dumps({"name": "done", "arguments": {}})
+
+
 def tau2_tool_to_function_schema(tool: Any) -> dict[str, Any]:
     """Convert a tau2 Tool into the function schema consumed by Pi and Qwen."""
     for attribute in ("openai_schema", "function_schema", "schema"):
@@ -143,14 +182,23 @@ class PiTauEnv(AgentEnv):
         self.last_info = _jsonable(info)
         self.policy = str(info.get("policy", ""))
         self.tool_schemas = [tau2_tool_to_function_schema(tool) for tool in info.get("tools", [])]
-        return Observation(text=str(observation))
+        text = str(observation or "").strip()
+        if not text and self.solo_mode:
+            text = _task_message(info.get("task"))
+        if not text:
+            raise RuntimeError(
+                f"tau2 returned an empty initial observation for task {self.task_id}. "
+                "solo_mode requires a task message from user_scenario."
+            )
+        return Observation(text=text)
 
     async def step(self, action: Action) -> tuple[Observation, float, bool, dict[str, Any]]:
         if self._env is None:
             raise RuntimeError("PiTauEnv.reset() must be called before step()")
         if action.text is None:
             raise ValueError("PiTauEnv requires Action.text")
-        observation, reward, terminated, truncated, info = await asyncio.to_thread(self._env.step, action.text)
+        action_text = _solo_mode_action(action.text) if self.solo_mode else action.text
+        observation, reward, terminated, truncated, info = await asyncio.to_thread(self._env.step, action_text)
         normalized_info = _jsonable(info)
         normalized_info["terminated"] = bool(terminated)
         normalized_info["truncated"] = bool(truncated)

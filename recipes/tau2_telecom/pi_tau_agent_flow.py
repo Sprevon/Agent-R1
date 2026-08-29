@@ -113,7 +113,7 @@ class PiTauAgentFlow(AgentFlowBase):
             user_llm_args=user_llm_args,
         )
         initial_observation = await asyncio.to_thread(env.reset, **kwargs)
-        if initial_observation.text is None:
+        if not (initial_observation.text or "").strip():
             raise RuntimeError("tau2 returned an empty initial observation")
 
         sidecar = await get_shared_pi_sidecar(

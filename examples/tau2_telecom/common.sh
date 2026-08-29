@@ -33,13 +33,16 @@ require_file "$TRAIN_PATH"
 require_file "$VAL_PATH"
 require_file "$PI_TAU_SIDECAR_ENTRYPOINT"
 
-if [[ -z "${TAU2_USER_LLM:-}" ]]; then
-  echo "TAU2_USER_LLM is unset. The user simulator is a separate OpenAI-compatible dependency, not the OPD teacher." >&2
-  exit 1
-fi
-if [[ -z "${OPENAI_API_KEY:-}" && "${TAU2_USER_LLM_ARGS:-}" != *api_key* ]]; then
-  echo "tau2 user simulator credentials are missing. Set OPENAI_API_KEY or put api_key in TAU2_USER_LLM_ARGS." >&2
-  exit 1
+solo_mode="$(printf '%s' "${TAU2_SOLO_MODE:-false}" | tr '[:upper:]' '[:lower:]')"
+if [[ "$solo_mode" != "true" && "$solo_mode" != "1" && "$solo_mode" != "yes" && "$solo_mode" != "on" ]]; then
+  if [[ -z "${TAU2_USER_LLM:-}" ]]; then
+    echo "TAU2_USER_LLM is unset. The user simulator is a separate OpenAI-compatible dependency, not the OPD teacher." >&2
+    exit 1
+  fi
+  if [[ -z "${OPENAI_API_KEY:-}" && "${TAU2_USER_LLM_ARGS:-}" != *api_key* ]]; then
+    echo "tau2 user simulator credentials are missing. Set OPENAI_API_KEY or put api_key in TAU2_USER_LLM_ARGS." >&2
+    exit 1
+  fi
 fi
 
 if [[ ! -d "$PROJECT_DIR/recipes/tau2_telecom/pi_sidecar/node_modules" ]]; then

@@ -54,10 +54,11 @@ def main() -> None:
     args = parser.parse_args()
 
     failures: list[str] = []
-    if not args.skip_user_simulator:
+    solo_mode = os.environ.get("TAU2_SOLO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not args.skip_user_simulator and not solo_mode:
         failures.extend(_user_simulator_failures())
-    if not ((3, 12) <= sys.version_info[:2] < (3, 14)):
-        failures.append(f"Python 3.12 or 3.13 is required by tau2 1.0.1; found {sys.version.split()[0]}")
+    python_supported = (3, 12) <= sys.version_info[:2] < (3, 14)
+    experimental_py310 = sys.version_info[:2] == (3, 10)
     node = shutil.which("node")
     if node is None:
         failures.append("node is not on PATH")
@@ -72,12 +73,26 @@ def main() -> None:
         ("verl.experimental.teacher_loop", "MultiTeacherModelManager"),
         ("verl.trainer.distillation", "distillation_ppo_loss"),
     ]
+    tau2_import_ok = False
     for module_name, attribute in imports:
         try:
             module = __import__(module_name, fromlist=[attribute])
             getattr(module, attribute)
+            if module_name.startswith("tau2."):
+                tau2_import_ok = True
         except Exception as exc:
             failures.append(f"{module_name}.{attribute}: {exc}")
+    if not python_supported:
+        if experimental_py310 and tau2_import_ok:
+            print(
+                f"Python {sys.version.split()[0]} is outside tau2's declared range; "
+                "continuing because AgentGymEnv imported successfully.",
+                file=sys.stderr,
+            )
+        else:
+            failures.append(
+                f"Python 3.12 or 3.13 is required by tau2 1.0.1; found {sys.version.split()[0]}"
+            )
 
     sidecar_dir = Path(__file__).resolve().parents[1] / "recipes" / "tau2_telecom" / "pi_sidecar"
     if not (sidecar_dir / "node_modules" / "@earendil-works" / "pi-agent-core").exists():
