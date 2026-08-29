@@ -108,6 +108,15 @@ class PiSidecarClient:
         finally:
             self._sessions.pop(session_id, None)
 
+    async def shutdown(self) -> None:
+        try:
+            if self._process is not None and self._process.returncode is None:
+                await self.send({"type": "shutdown"})
+                await asyncio.wait_for(self._process.wait(), timeout=5)
+        except Exception:
+            if self._process is not None and self._process.returncode is None:
+                self._process.kill()
+
     async def send(self, payload: dict[str, Any]) -> None:
         if self._process is None or self._process.returncode is not None or self._process.stdin is None:
             raise PiSidecarError("Pi sidecar is not running")
