@@ -14,7 +14,7 @@ exec "$PYTHON_BIN" -m agent_r1.trainer.main_agent_ppo \
   ++algorithm.gigpo.mode="${AGENT_R1_GIGPO_MODE:-mean_std_norm}" \
   ++algorithm.gigpo.enable_similarity="${AGENT_R1_GIGPO_ENABLE_SIMILARITY:-False}" \
   ++algorithm.gigpo.similarity_thresh="${AGENT_R1_GIGPO_SIMILARITY_THRESH:-0.95}" \
-  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.use_kl_loss="${AGENT_R1_GIGPO_USE_KL_LOSS:-False}" \
   actor_rollout_ref.actor.kl_loss_coef="${AGENT_R1_GIGPO_KL_COEF:-0.001}" \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
   actor_rollout_ref.rollout.n="$ROLLOUT_N" \
