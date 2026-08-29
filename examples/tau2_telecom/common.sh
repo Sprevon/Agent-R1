@@ -84,6 +84,7 @@ common_args=(
   "actor_rollout_ref.rollout.agent.num_workers=$AGENT_FLOW_WORKERS"
   "actor_rollout_ref.rollout.agent.default_agent_flow=pi_tau_telecom_agent"
   "actor_rollout_ref.rollout.trace.backend=null"
+  "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1"
   "actor_rollout_ref.ref.fsdp_config.param_offload=True"
   "critic.enable=False"
   "reward_model.enable=False"
