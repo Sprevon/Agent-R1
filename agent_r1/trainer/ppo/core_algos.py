@@ -514,6 +514,70 @@ def _build_step_groups(
     return step_group_uids
 
 
+def _group_diagnostics(scores: torch.Tensor, group_uids: np.ndarray, prefix: str) -> dict[str, float]:
+    groups: dict[object, list[torch.Tensor]] = defaultdict(list)
+    for index, group_uid in enumerate(group_uids):
+        groups[group_uid].append(scores[index])
+
+    group_count = len(groups)
+    singleton_groups = sum(len(group_scores) == 1 for group_scores in groups.values())
+    singleton_rows = sum(len(group_scores) for group_scores in groups.values() if len(group_scores) == 1)
+    comparable_groups = [group_scores for group_scores in groups.values() if len(group_scores) > 1]
+    zero_variance_groups = sum(
+        torch.std(torch.stack(group_scores), unbiased=False).abs().item() <= 1e-12
+        for group_scores in comparable_groups
+    )
+    row_count = int(scores.shape[0])
+    return {
+        f"gigpo/{prefix}_group_count": float(group_count),
+        f"gigpo/{prefix}_singleton_group_fraction": singleton_groups / max(group_count, 1),
+        f"gigpo/{prefix}_singleton_row_fraction": singleton_rows / max(row_count, 1),
+        f"gigpo/{prefix}_zero_variance_group_fraction": zero_variance_groups / max(len(comparable_groups), 1),
+    }
+
+
+def compute_gigpo_group_metrics(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    anchor_obs: np.ndarray,
+    index: np.ndarray,
+    trajectory_uids: np.ndarray,
+    step_indices: np.ndarray,
+    gamma: float,
+    enable_similarity: bool = False,
+    similarity_thresh: float = 0.95,
+) -> dict[str, float]:
+    """Measure whether a GiGPO batch has usable trajectory and anchor groups."""
+    with torch.no_grad():
+        step_returns = compute_step_discounted_returns(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            trajectory_uids=trajectory_uids,
+            step_indices=step_indices,
+            gamma=gamma,
+        )
+        _, traj2total_score, traj2index = _trajectory_total_scores(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            trajectory_uids=trajectory_uids,
+        )
+        trajectory_ids = list(traj2total_score)
+        trajectory_scores = torch.stack([traj2total_score[trajectory_id] for trajectory_id in trajectory_ids])
+        trajectory_groups = np.array([traj2index[trajectory_id] for trajectory_id in trajectory_ids], dtype=object)
+        step_groups = _build_step_groups(
+            anchor_obs=anchor_obs,
+            index=index,
+            enable_similarity=enable_similarity,
+            similarity_thresh=similarity_thresh,
+        )
+        metrics = _group_diagnostics(trajectory_scores, trajectory_groups, "trajectory")
+        metrics.update(_group_diagnostics(step_returns, step_groups, "step"))
+        unique_groups = {_to_hashable(group_uid) for group_uid in step_groups.tolist()}
+        metrics["gigpo/unique_anchor_ratio"] = len(unique_groups) / max(len(step_groups), 1)
+        return metrics
+
+
 def _normalize_group_scores(
     scores: torch.Tensor,
     group_uids: np.ndarray,

@@ -117,6 +117,9 @@ ENV/
 # vim
 *.swp
 
+# Pi sidecar
+recipes/tau2_telecom/pi_sidecar/node_modules/
+
 # emacs
 *~
 

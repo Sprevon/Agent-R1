@@ -1,0 +1,4 @@
+# tau2 1.0.1 contains the public AgentGymEnv used by the Pi harness bridge.
+# tau2 requires Python >=3.12,<3.14.
+tau2-bench[gym] @ git+https://github.com/sierra-research/tau2-bench.git@v1.0.1
+
