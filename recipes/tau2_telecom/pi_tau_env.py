@@ -181,7 +181,24 @@ class PiTauEnv(AgentEnv):
         observation, info = self._env.reset(seed=self.seed)
         self.last_info = _jsonable(info)
         self.policy = str(info.get("policy", ""))
-        self.tool_schemas = [tau2_tool_to_function_schema(tool) for tool in info.get("tools", [])]
+        # In tau2 solo mode AgentGymEnv exposes both assistant tools and
+        # device/user tools through ``info["tools"]``.  Pi's agent must only
+        # see the former: device tools are for the simulated user and calling
+        # them from the assistant side terminates the episode with
+        # ``agent_error``.  Recover the assistant-side names from the freshly
+        # constructed domain environment and retain tau2's explicit stop
+        # tools, which are injected by GymAgent after environment creation.
+        assistant_tool_names: set[str] | None = None
+        if self.solo_mode and hasattr(self._env, "_get_environment"):
+            assistant_environment = self._env._get_environment()
+            assistant_tool_names = {
+                str(tool.name) for tool in assistant_environment.get_tools()
+            }
+            assistant_tool_names.update({"done", "transfer_to_human_agents"})
+        schemas = [tau2_tool_to_function_schema(tool) for tool in info.get("tools", [])]
+        if assistant_tool_names is not None:
+            schemas = [schema for schema in schemas if schema["name"] in assistant_tool_names]
+        self.tool_schemas = schemas
         text = str(observation or "").strip()
         if not text and self.solo_mode:
             text = _task_message(info.get("task"))
