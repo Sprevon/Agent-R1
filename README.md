@@ -188,6 +188,12 @@ The installer uses [`requirements-opd.txt`](requirements-opd.txt), which pins th
 `PYTHON_BIN` to select another Python executable. `VERL_REPO` and `VERL_REF` are optional overrides for fork
 development.
 
+For the Qwen3-4B student, Qwen3-32B teacher, and single-node three-GPU setup, use the staged experiment plan and
+profiled launcher:
+
+- [`docs/opd-qwen3-4b-32b-3xpro6000-plan.md`](docs/opd-qwen3-4b-32b-3xpro6000-plan.md)
+- [`examples/gsm8k/run_opd_qwen3_4b_teacher32b_3xpro6000.sh`](examples/gsm8k/run_opd_qwen3_4b_teacher32b_3xpro6000.sh)
+
 - `main` contains the current v0.1.0 architecture based on Step-level MDP and layered abstractions.
 - `legacy` preserves the previous implementation for reference.
 - Use a recent source checkout of `verl` that includes the AgentFlow / async rollout stack required by this repository.

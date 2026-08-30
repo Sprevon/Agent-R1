@@ -941,6 +941,13 @@ class AgentFlowManager:
                 sequence_ids=sequence_ids,
                 routing_key=routing_key,
             )
+            expected_ids = torch.as_tensor(sequence_ids, dtype=teacher_ids.dtype, device=teacher_ids.device)
+            if teacher_ids.ndim != 1 or not torch.equal(teacher_ids, expected_ids):
+                raise RuntimeError(
+                    "Teacher token IDs do not match the student rollout sequence at "
+                    f"batch index {index}. Verify the student and teacher tokenizers with "
+                    "scripts/check_opd_tokenizers.py before training."
+                )
             left_pad_size = prompt_width - prompt_length
             right_pad_size = response_width - response_length
             sequence_padding = (left_pad_size, right_pad_size)
