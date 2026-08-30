@@ -1,0 +1,83 @@
+# Structured parameters extracted from:
+# https://github.com/vllm-project/vime/issues/327
+
+experiment:
+  student: Qwen3-4B
+  teacher: Qwen3-32B
+  task: GSM8K
+  method: GRPO+OPD
+  reference_gpus: "8x A800 80GB"
+
+gpu_layout:
+  student_gpus: [0, 1, 2, 3]
+  teacher_gpus: [4, 5, 6, 7]
+  student_tp: 2
+  teacher_tp: 4
+
+teacher:
+  dtype: bfloat16
+  gpu_memory_utilization: 0.85
+  max_model_len: 8192
+  port: 13141
+
+rollout:
+  num_rollout: 500
+  rollout_batch_size: 32
+  n_samples_per_prompt: 4
+  rollout_max_response_len: 4096
+  rollout_temperature: 0.8
+  global_batch_size: 64
+
+eval:
+  interval: 50
+  n_samples_per_prompt: 1
+  max_response_len: 4096
+  top_k: 1
+
+parallelism:
+  tensor_model_parallel_size: 2
+  pipeline_model_parallel_size: 1
+  context_parallel_size: 1
+  expert_model_parallel_size: 1
+  expert_tensor_parallel_size: 1
+  sequence_parallel: true
+  dynamic_batch_size: true
+  max_tokens_per_gpu: 9216
+
+student_vllm:
+  rollout_num_gpus_per_engine: 2
+  gpu_memory_utilization: 0.7
+  max_num_seqs: 32
+  max_cudagraph_capture_size: 16
+
+algorithm:
+  advantage_estimator: grpo
+  use_opd: true
+  opd_type: vllm
+  opd_kl_coef: 1.0
+  use_kl_loss: true
+  kl_loss_coef: 0.0
+  kl_loss_type: low_var_kl
+  entropy_coef: 0.0
+  eps_clip: 0.2
+  eps_clip_high: 0.28
+
+optimizer:
+  type: adam
+  lr: 1.0e-6
+  lr_decay_style: constant
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+
+checkpoint:
+  save_interval: 50
+  megatron_to_hf_mode: bridge
+
+results:
+  teacher_gsm8k_accuracy: 0.886
+  student_pre_opd_accuracy: 0.788
+  student_post_opd_accuracy: 0.856
+  opd_reverse_kl_start: 0.216
+  opd_reverse_kl_end: 0.110
+  approximate_wall_time_per_rollout_min: 2
