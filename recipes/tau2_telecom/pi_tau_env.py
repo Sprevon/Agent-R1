@@ -78,16 +78,6 @@ def _task_message(task: Any) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
-def _solo_mode_action(text: str) -> str:
-    """Map non-tool text to tau2's `done` tool so DummyUser is never invoked."""
-    stripped = text.strip()
-    if not stripped:
-        return json.dumps({"name": "done", "arguments": {}})
-    if stripped.startswith("{") or stripped.startswith("done("):
-        return text
-    return json.dumps({"name": "done", "arguments": {}})
-
-
 def tau2_tool_to_function_schema(tool: Any) -> dict[str, Any]:
     """Convert a tau2 Tool into the function schema consumed by Pi and Qwen."""
     for attribute in ("openai_schema", "function_schema", "schema"):
@@ -245,8 +235,7 @@ class PiTauEnv(AgentEnv):
             raise RuntimeError("PiTauEnv.reset() must be called before step()")
         if action.text is None:
             raise ValueError("PiTauEnv requires Action.text")
-        action_text = _solo_mode_action(action.text) if self.solo_mode else action.text
-        observation, reward, terminated, truncated, info = await asyncio.to_thread(self._env.step, action_text)
+        observation, reward, terminated, truncated, info = await asyncio.to_thread(self._env.step, action.text)
         normalized_info = _jsonable(info)
         normalized_info["terminated"] = bool(terminated)
         normalized_info["truncated"] = bool(truncated)

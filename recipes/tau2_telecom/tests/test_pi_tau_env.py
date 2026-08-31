@@ -80,14 +80,6 @@ class PiTauEnvHelpersTest(unittest.TestCase):
         self.assertIn("Mobile data is not working.", message)
         self.assertIn("Turn off airplane mode and enable roaming.", message)
 
-    def test_solo_mode_text_is_mapped_to_done_tool(self) -> None:
-        self.assertEqual(
-            json.loads(_solo_mode_action("I finished the request.")),
-            {"name": "done", "arguments": {}},
-        )
-        tool = '{"name": "get_customer_by_phone", "arguments": {"phone_number": "1"}}'
-        self.assertEqual(_solo_mode_action(tool), tool)
-
     def test_canonical_allowlist_preserves_extension_order(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, ".pi"))
