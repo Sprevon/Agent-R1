@@ -634,7 +634,7 @@ class AgentFlowWorkerBase:
                 dataset_cls=self.dataset_cls,
                 dataset_config=self.config.data,
             )
-            output: AgentFlowOutput = await agent_flow.run(sampling_params, **kwargs)
+            output: AgentFlowOutput = await agent_flow.run(sampling_params, _trajectory=trajectory, **kwargs)
 
             return output
 

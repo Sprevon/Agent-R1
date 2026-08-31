@@ -1,0 +1,12 @@
+- name: pi_tau_telecom_agent
+  _target_: recipes.tau2_telecom.pi_tau_agent_flow.PiTauAgentFlow
+  domain: telecom
+  max_steps: ${oc.env:PI_TAU_MAX_STEPS,30}
+  tau2_max_steps: ${oc.env:TAU2_MAX_STEPS,100}
+  event_timeout: ${oc.env:PI_TAU_EVENT_TIMEOUT,300}
+  node_binary: ${oc.env:PI_NODE_BINARY,node}
+  sidecar_entrypoint: ${oc.env:PI_TAU_SIDECAR_ENTRYPOINT,recipes/tau2_telecom/pi_sidecar/src/main.mjs}
+  skills_dir: ${oc.env:PI_TAU_SKILLS_DIR,/root/autodl-tmp/code/tau2-bench-official/.pi/skills}
+  solo_mode: ${oc.env:TAU2_SOLO_MODE,false}
+  user_llm: ${oc.env:TAU2_USER_LLM,openai/gpt-4.1-mini}
+  user_llm_args: ${oc.env:TAU2_USER_LLM_ARGS,"{}"}
