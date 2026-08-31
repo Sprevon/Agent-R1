@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -160,6 +161,26 @@ class PiTauEnv(AgentEnv):
         self.last_info: dict[str, Any] = {}
         self._env: Any = None
 
+    def _task_tool_allowlist(self) -> list[str] | None:
+        """Read the allowlist used by the canonical tau2-bench Pi extension."""
+        root = os.environ.get("TAU2_BENCH_ROOT", "").strip()
+        if not root:
+            return None
+        path = os.path.join(root, ".pi", "task_tool_allowlists.json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                catalog = json.load(handle)
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Cannot read canonical tau2 Pi tool allowlists: {path}") from exc
+        names = catalog.get(self.task_id)
+        if names is None:
+            return None
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise ValueError(f"Invalid tool allowlist for tau2 task {self.task_id}")
+        return list(names)
+
     def reset(self, **kwargs) -> Observation:
         try:
             from tau2.gym.gym_agent import AgentGymEnv
@@ -198,6 +219,16 @@ class PiTauEnv(AgentEnv):
         schemas = [tau2_tool_to_function_schema(tool) for tool in info.get("tools", [])]
         if assistant_tool_names is not None:
             schemas = [schema for schema in schemas if schema["name"] in assistant_tool_names]
+        task_allowlist = self._task_tool_allowlist()
+        if task_allowlist is not None:
+            available = {schema["name"] for schema in schemas}
+            missing = set(task_allowlist) - available
+            if missing:
+                raise RuntimeError(
+                    f"Canonical tau2 Pi tool allowlist references unavailable tools: {sorted(missing)}"
+                )
+            by_name = {schema["name"]: schema for schema in schemas}
+            schemas = [by_name[name] for name in task_allowlist]
         self.tool_schemas = schemas
         text = str(observation or "").strip()
         if not text and self.solo_mode:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import unittest
 
 from recipes.tau2_telecom.pi_tau_env import (
@@ -85,6 +87,22 @@ class PiTauEnvHelpersTest(unittest.TestCase):
         )
         tool = '{"name": "get_customer_by_phone", "arguments": {"phone_number": "1"}}'
         self.assertEqual(_solo_mode_action(tool), tool)
+
+    def test_canonical_allowlist_preserves_extension_order(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, ".pi"))
+            with open(os.path.join(root, ".pi", "task_tool_allowlists.json"), "w", encoding="utf-8") as handle:
+                json.dump({"task": ["second", "first"]}, handle)
+            previous = os.environ.get("TAU2_BENCH_ROOT")
+            os.environ["TAU2_BENCH_ROOT"] = root
+            try:
+                env = PiTauEnv(task_id="task", solo_mode=True)
+                self.assertEqual(env._task_tool_allowlist(), ["second", "first"])
+            finally:
+                if previous is None:
+                    os.environ.pop("TAU2_BENCH_ROOT", None)
+                else:
+                    os.environ["TAU2_BENCH_ROOT"] = previous
 
 
 if __name__ == "__main__":
