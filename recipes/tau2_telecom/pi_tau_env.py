@@ -138,7 +138,7 @@ class PiTauEnv(AgentEnv):
         self,
         *,
         task_id: str,
-        domain: str = "telecom",
+        domain: str = "telecom-workflow",
         max_steps: int = 100,
         seed: int | None = None,
         solo_mode: bool = False,

@@ -80,7 +80,7 @@ class PiTauAgentFlow(AgentFlowBase):
             )
         )
         self.skills_dir = str(kwargs.get("skills_dir", recipe_dir / "skills"))
-        self.domain = str(kwargs.get("domain", "telecom"))
+        self.domain = str(kwargs.get("domain", "telecom-workflow"))
         self.tau2_max_steps = int(kwargs.get("tau2_max_steps", 100))
         self.solo_mode = _as_bool(kwargs.get("solo_mode", False))
         self.default_user_llm = kwargs.get("user_llm")

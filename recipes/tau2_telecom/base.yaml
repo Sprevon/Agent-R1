@@ -1,6 +1,6 @@
 - name: pi_tau_telecom_agent
   _target_: recipes.tau2_telecom.pi_tau_agent_flow.PiTauAgentFlow
-  domain: telecom
+  domain: telecom-workflow
   max_steps: ${oc.env:PI_TAU_MAX_STEPS,30}
   tau2_max_steps: ${oc.env:TAU2_MAX_STEPS,100}
   event_timeout: ${oc.env:PI_TAU_EVENT_TIMEOUT,300}
