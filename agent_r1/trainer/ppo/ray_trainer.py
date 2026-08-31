@@ -23,6 +23,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from functools import reduce
+from numbers import Real
 from pprint import pprint
 from typing import Optional
 
@@ -138,6 +139,52 @@ def make_json_safe(value):
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [make_json_safe(item) for item in value]
     return value
+
+
+def _flatten_numeric_validation_value(value, prefix: str, output: dict[str, float]) -> None:
+    """Collect numeric leaves for veRL's scalar validation-metric reducer.
+
+    Tau2 reward diagnostics intentionally contain nested JSON objects and
+    metadata strings.  Those values are useful in generation dumps, but
+    ``process_validation_metrics`` expects every metric series to be numeric.
+    """
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            child_prefix = f"{prefix}/{key}" if prefix else str(key)
+            _flatten_numeric_validation_value(item, child_prefix, output)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, item in enumerate(value):
+            child_prefix = f"{prefix}/{index}" if prefix else str(index)
+            _flatten_numeric_validation_value(item, child_prefix, output)
+        return
+    if isinstance(value, Real):
+        output[prefix] = float(value)
+
+
+def numeric_validation_reward_infos(reward_extra_infos_dict: Mapping[str, Sequence]) -> dict[str, list[float]]:
+    """Return only aligned numeric reward-info series for validation metrics.
+
+    The original JSON-safe reward info is still used by validation dumps.  For
+    aggregate metrics we retain only fields present and numeric for every
+    sample, preventing nested dicts or string metadata from reaching
+    ``np.mean`` inside veRL.
+    """
+    filtered: dict[str, list[float]] = {}
+    for key, values in reward_extra_infos_dict.items():
+        if len(values) == 0:
+            continue
+        flattened = []
+        for value in values:
+            leaves: dict[str, float] = {}
+            _flatten_numeric_validation_value(value, str(key), leaves)
+            flattened.append(leaves)
+        common_keys = set(flattened[0])
+        for leaves in flattened[1:]:
+            common_keys.intersection_update(leaves)
+        for leaf_key in sorted(common_keys):
+            filtered[leaf_key] = [leaves[leaf_key] for leaves in flattened]
+    return filtered
 
 
 def build_trajectory_dump_entries(
@@ -710,7 +757,11 @@ class RayAgentTrainer(RayPPOTrainer):
 
         data_sources = np.concatenate(data_source_lst, axis=0)
 
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        # veRL's reducer computes means and cannot consume nested JSON or
+        # string metadata from tau2 reward diagnostics. Keep the full values
+        # for dumps above, but pass only aligned numeric leaves to the reducer.
+        validation_reward_infos = numeric_validation_reward_infos(reward_extra_infos_dict)
+        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, validation_reward_infos)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
