@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_DIR"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
@@ -15,6 +15,19 @@ if [[ ! -d "$TAU2_BENCH_ROOT/.pi/skills" && -d "$PROJECT_DIR/../tau2-bench/.pi/s
 fi
 export TAU2_BENCH_ROOT
 export PI_TAU_SKILLS_DIR="${PI_TAU_SKILLS_DIR:-$TAU2_BENCH_ROOT/.pi/skills}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  for candidate in /root/envs/toolcall/bin/python /root/miniconda3/bin/python python3; do
+    if command -v "$candidate" >/dev/null 2>&1 || [[ -x "$candidate" ]]; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "No usable Python interpreter found; set PYTHON_BIN explicitly." >&2
+  exit 1
+fi
+export PYTHONPATH="$PROJECT_DIR:$PROJECT_DIR/recipes:$TAU2_BENCH_ROOT/src:/root/autodl-tmp/code/verl${PYTHONPATH:+:$PYTHONPATH}"
 
 CONFIG_PATH="${PI_TAU_CONFIG_PATH:-$PROJECT_DIR/recipes/tau2_telecom/base.yaml}"
 TRAIN_PATH="${TAU2_TRAIN_PATH:-$PROJECT_DIR/data/tau2_telecom/train.parquet}"
