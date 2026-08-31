@@ -9,7 +9,6 @@ from recipes.tau2_telecom.pi_tau_env import (
     PiTauEnv,
     _as_bool,
     _jsonable,
-    _solo_mode_action,
     _task_message,
     tau2_tool_to_function_schema,
 )
