@@ -10,10 +10,9 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from agent_r1.agent_flow.agent_flow import AgentFlowBase, AgentFlowOutput, AgentFlowStep, register
-from agent_r1.env.base import Action
-from recipes.tau2_telecom.pi_sidecar_client import PiSidecarError, get_shared_pi_sidecar
-from recipes.tau2_telecom.pi_tau_env import PiTauEnv, _as_bool
+from agent_r1.agent_flow.agent_flow import AgentFlowBase, AgentFlowOutput, register
+from recipes.tau2_telecom.pi_sidecar_client import PiSidecarClient, PiSidecarError
+from recipes.tau2_telecom.pi_training_recorder import PiTrainingRecorder
 from verl.experimental.agent_loop.tool_parser import ToolParser
 
 logger = logging.getLogger(__name__)
@@ -40,30 +39,9 @@ def _metric_add(metrics: dict[str, float], key: str, started_at: float) -> None:
     metrics[key] = metrics.get(key, 0.0) + perf_counter() - started_at
 
 
-def _extract_runtime_info(info: dict[str, Any]) -> dict[str, Any]:
-    reward_info = info.get("reward_info", {})
-    if isinstance(reward_info, str):
-        try:
-            reward_info = json.loads(reward_info)
-        except json.JSONDecodeError:
-            reward_info = {"raw": reward_info}
-    simulation_run = info.get("simulation_run", {})
-    if isinstance(simulation_run, str):
-        try:
-            simulation_run = json.loads(simulation_run)
-        except json.JSONDecodeError:
-            simulation_run = {"raw": simulation_run}
-    return {
-        "reward_info": reward_info,
-        "simulation_run": simulation_run,
-        "terminated": bool(info.get("terminated", False)),
-        "truncated": bool(info.get("truncated", False)),
-    }
-
-
 @register("pi_tau_telecom_agent")
 class PiTauAgentFlow(AgentFlowBase):
-    """Drive tau2 Telecom through the real Pi agent-core runtime."""
+    """Use the official Pi loop while Agent-R1 supplies generations and trains."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -79,12 +57,22 @@ class PiTauAgentFlow(AgentFlowBase):
                 os.getenv("PI_TAU_SIDECAR_ENTRYPOINT", recipe_dir / "pi_sidecar" / "src" / "main.mjs"),
             )
         )
-        self.skills_dir = str(kwargs.get("skills_dir", recipe_dir / "skills"))
-        self.domain = str(kwargs.get("domain", "telecom-workflow"))
-        self.tau2_max_steps = int(kwargs.get("tau2_max_steps", 100))
-        self.solo_mode = _as_bool(kwargs.get("solo_mode", False))
-        self.default_user_llm = kwargs.get("user_llm")
-        self.default_user_llm_args = kwargs.get("user_llm_args")
+        self.tau2_root = str(
+            kwargs.get("tau2_root", os.getenv("TAU2_BENCH_ROOT", ""))
+        )
+        self.pi_coding_agent_entrypoint = str(
+            kwargs.get("pi_coding_agent_entrypoint", os.getenv("PI_CODING_AGENT_ENTRYPOINT", ""))
+        )
+        self.training_extension = str(
+            kwargs.get(
+                "training_extension",
+                os.getenv(
+                    "PI_TAU_TRAINING_EXTENSION",
+                    Path(self.tau2_root) / ".pi" / "extensions" / "agent-r1-training.ts",
+                ),
+            )
+        )
+        self.agent_dir = str(kwargs.get("agent_dir", os.getenv("PI_AGENT_DIR", "")))
         self.tool_parser = ToolParser.get_tool_parser(
             self.config.actor_rollout_ref.rollout.multi_turn.format,
             self.tokenizer,
@@ -95,53 +83,45 @@ class PiTauAgentFlow(AgentFlowBase):
         task_id = str(extra_info.get("task_id") or kwargs.get("task_id") or "")
         if not task_id:
             raise ValueError("tau2 Telecom sample is missing extra_info.task_id")
+        if not self.tau2_root:
+            raise ValueError("TAU2_BENCH_ROOT/tau2_root is required for the official Pi extension")
+        if not self.pi_coding_agent_entrypoint:
+            raise ValueError("PI_CODING_AGENT_ENTRYPOINT/pi_coding_agent_entrypoint is required")
+
         split = str(extra_info.get("split", "train"))
-        trajectory = _as_dict(kwargs.get("_trajectory"))
-        rollout_n = int(trajectory.get("rollout_n", extra_info.get("rollout_n", 0)))
-        base_seed = int(extra_info.get("seed", kwargs.get("seed", 0)))
-        trajectory_seed = base_seed + rollout_n
-        user_llm = extra_info.get("user_llm", self.default_user_llm)
-        user_llm_args = extra_info.get("user_llm_args", self.default_user_llm_args)
-
-        env = PiTauEnv(
-            task_id=task_id,
-            domain=self.domain,
-            max_steps=self.tau2_max_steps,
-            seed=trajectory_seed,
-            solo_mode=self.solo_mode,
-            user_llm=user_llm,
-            user_llm_args=user_llm_args,
-        )
-        initial_observation = await asyncio.to_thread(env.reset, **kwargs)
-        if not (initial_observation.text or "").strip():
-            raise RuntimeError("tau2 returned an empty initial observation")
-
-        sidecar = await get_shared_pi_sidecar(
+        session_id = uuid4().hex
+        sidecar = PiSidecarClient(
             node_binary=self.node_binary,
             entrypoint=self.sidecar_entrypoint,
+            env={
+                "TAU2_BENCH_ROOT": self.tau2_root,
+                "TAU2_TELECOM_TASK_ID": task_id,
+                "PI_CODING_AGENT_ENTRYPOINT": self.pi_coding_agent_entrypoint,
+            },
         )
-        session_id = uuid4().hex
-        session = await sidecar.open_session(
-            {
-                "session_id": session_id,
-                "initial_observation": initial_observation.text,
-                "domain_policy": env.policy,
-                "skills_dir": self.skills_dir,
-                "tools": env.tool_schemas,
-                "max_turns": self.max_steps,
-            }
-        )
-
+        session = None
+        recorder = PiTrainingRecorder(session_id=session_id, task_id=task_id, split=split)
         metrics: dict[str, float] = {}
-        pending_steps: dict[str, dict[str, Any]] = {}
-        steps: list[AgentFlowStep] = []
+        evaluation: dict[str, Any] | None = None
         session_finished = False
 
         try:
+            session = await sidecar.open_session(
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "tau2_root": self.tau2_root,
+                    "training_extension": self.training_extension,
+                    "agent_dir": self.agent_dir or str(Path(self.tau2_root) / ".pi" / "agent"),
+                    "pi_coding_agent_entrypoint": self.pi_coding_agent_entrypoint,
+                    "max_turns": self.max_steps,
+                }
+            )
+
             while not session_finished:
                 event = await session.next_event(timeout=self.event_timeout)
                 event_type = event.get("type")
-                if event_type == "session_started":
+                if event_type in {"session_started", "session_info"}:
                     continue
                 if event_type == "generation_request":
                     started_at = perf_counter()
@@ -172,10 +152,7 @@ class PiTauAgentFlow(AgentFlowBase):
                         lambda ids=response_ids: self.tokenizer.decode(ids, skip_special_tokens=True),
                     )
                     parsed_text, tool_calls = await self.tool_parser.extract_tool_calls(response_ids)
-                    if isinstance(parsed_text, str):
-                        response_text = parsed_text
-                    else:
-                        response_text = "" if tool_calls else decoded_response
+                    response_text = parsed_text if isinstance(parsed_text, str) else ("" if tool_calls else decoded_response)
                     if not tool_calls and not response_text:
                         response_text = decoded_response
                     tool_call_payload = []
@@ -192,18 +169,19 @@ class PiTauAgentFlow(AgentFlowBase):
                             }
                         )
 
-                    pending_steps[generation_id] = {
-                        "prompt_ids": prompt_ids,
-                        "response_ids": response_ids,
-                        "response_logprobs": output.log_probs[: self.response_length] if output.log_probs else None,
-                        "routed_experts": (
-                            output.routed_experts[: len(prompt_ids) + self.response_length]
+                    recorder.record_generation(
+                        generation_id,
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+                        routed_experts=(
+                            output.routed_experts[: len(prompt_ids) + len(response_ids)]
                             if output.routed_experts is not None
                             else None
                         ),
-                        "anchor_obs": str(event["anchor_obs"]),
-                        "response_text": response_text,
-                    }
+                        anchor_obs=str(event.get("anchor_obs", "")),
+                        response_text=response_text,
+                    )
                     await session.respond(
                         str(event["id"]),
                         {
@@ -215,70 +193,24 @@ class PiTauAgentFlow(AgentFlowBase):
                     _metric_add(metrics, "generate_sequences", started_at)
                     continue
 
-                if event_type == "environment_request":
-                    started_at = perf_counter()
-                    generation_id = str(event["generation_id"])
-                    pending = pending_steps.get(generation_id)
-                    if pending is None:
-                        raise PiSidecarError(f"environment_request references unknown generation {generation_id}")
-                    pending["action"] = str(event["action"])
-                    try:
-                        next_observation, reward, done, info = await env.step(Action(text=str(event["action"])))
-                        pending["observation"] = next_observation.text or ""
-                        await session.respond(
-                            str(event["id"]),
-                            {
-                                "observation": next_observation.text or "",
-                                "reward": reward,
-                                "terminated": done,
-                                "truncated": bool(info.get("truncated", False)),
-                                "info": info,
-                            },
-                        )
-                    except Exception as exc:
-                        await session.respond_error(str(event["id"]), str(exc))
-                        raise
-                    finally:
-                        _metric_add(metrics, "tool_calls", started_at)
-                    continue
-
                 if event_type == "step_complete":
                     generation_id = str(event["generation_id"])
-                    pending = pending_steps.pop(generation_id, None)
-                    if pending is None:
-                        raise PiSidecarError(f"step_complete references unknown generation {generation_id}")
-                    info = event.get("info") if isinstance(event.get("info"), dict) else {}
                     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
-                    runtime_info = _extract_runtime_info(info)
-                    step = AgentFlowStep(
-                        prompt_ids=pending["prompt_ids"],
-                        response_ids=pending["response_ids"],
-                        response_logprobs=pending["response_logprobs"],
-                        routed_experts=pending["routed_experts"],
-                        reward_score=float(event.get("reward", 0.0)),
-                        extra_fields={
-                            "anchor_obs": pending["anchor_obs"],
-                            "pi_session_id": session_id,
-                            "pi_generation_id": generation_id,
-                            "tau2_task_id": task_id,
-                            "tau2_split": split,
-                            "tau2_terminated": bool(event.get("terminated", False)),
-                            "tau2_truncated": bool(event.get("truncated", False)),
-                            "pi_invalid_action": bool(event.get("invalid_action", False)),
-                            "pi_action": pending.get("action", ""),
-                            "tau2_observation": pending.get("observation", ""),
-                            "pi_diagnostics": diagnostics,
-                            "reward_extra_info": {
-                                "score": float(event.get("reward", 0.0)),
-                                "task_id": task_id,
-                                "split": split,
-                                "invalid_action": bool(event.get("invalid_action", False)),
-                                **diagnostics,
-                                **runtime_info,
-                            },
-                        },
+                    recorder.record_turn(
+                        generation_id,
+                        assistant_message=event.get("assistant_message"),
+                        tool_results=event.get("tool_results", []),
+                        truncated=bool(event.get("truncated", False)),
+                        diagnostics=diagnostics,
                     )
-                    steps.append(await self._postprocess(step, **kwargs))
+                    continue
+
+                if event_type == "evaluation_result":
+                    result = event.get("result")
+                    if isinstance(result, dict):
+                        evaluation = result
+                    else:
+                        raise PiSidecarError("evaluation_result.result must be a JSON object")
                     continue
 
                 if event_type == "session_complete":
@@ -288,11 +220,10 @@ class PiTauAgentFlow(AgentFlowBase):
                     raise PiSidecarError(str(event.get("error", event)))
                 raise PiSidecarError(f"Unknown Pi sidecar event: {event}")
         finally:
-            await session.close()
-            await env.close()
+            if session is not None:
+                await session.close()
+            await sidecar.shutdown()
 
-        if pending_steps:
-            raise PiSidecarError(f"Pi session ended with unfinished generations: {sorted(pending_steps)}")
-        if not steps:
-            raise RuntimeError(f"Pi/tau2 session for task {task_id} produced no trainable steps")
-        return AgentFlowOutput(steps=steps, metrics=metrics)
+        steps = recorder.finalize(evaluation)
+        processed_steps = [await self._postprocess(step, **kwargs) for step in steps]
+        return AgentFlowOutput(steps=processed_steps, metrics=metrics)

@@ -1,11 +1,6 @@
 import { createInterface } from "node:readline";
-import {
-  Agent,
-  formatSkillInvocation,
-  formatSkillsForSystemPrompt,
-  loadSkills,
-} from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 const EMPTY_USAGE = {
@@ -45,8 +40,8 @@ function errorMessage(error) {
 function requestHost(sessionId, type, payload, abortSignal) {
   const id = `${sessionId}:${++requestSequence}`;
   emit({ type, id, session_id: sessionId, ...payload });
-  return new Promise((resolve, reject) => {
-    const pending = { resolve, reject };
+  return new Promise((resolveRequest, rejectRequest) => {
+    const pending = { resolve: resolveRequest, reject: rejectRequest };
     pendingHostRequests.set(id, pending);
     if (!abortSignal) return;
     const onAbort = () => {
@@ -74,21 +69,21 @@ function contentText(content) {
 function contextToOpenAi(context) {
   const messages = [];
   if (context.systemPrompt) messages.push({ role: "system", content: context.systemPrompt });
-  for (const message of context.messages) {
+  for (const message of context.messages ?? []) {
     if (message.role === "user") {
       messages.push({ role: "user", content: contentText(message.content) });
       continue;
     }
     if (message.role === "assistant") {
-      const text = contentText(message.content);
-      const toolCalls = message.content
-        .filter((item) => item.type === "toolCall")
+      const content = Array.isArray(message.content) ? message.content : [];
+      const toolCalls = content
+        .filter((item) => item && item.type === "toolCall")
         .map((item) => ({
           id: item.id,
           type: "function",
-          function: { name: item.name, arguments: JSON.stringify(item.arguments) },
+          function: { name: item.name, arguments: JSON.stringify(item.arguments ?? {}) },
         }));
-      const converted = { role: "assistant", content: text };
+      const converted = { role: "assistant", content: contentText(message.content) };
       if (toolCalls.length > 0) converted.tool_calls = toolCalls;
       messages.push(converted);
       continue;
@@ -127,11 +122,11 @@ function makeAssistantMessage(result) {
   if (text) content.push({ type: "text", text });
   content.push(
     ...toolCalls.map((toolCall) => ({
-        type: "toolCall",
-        id: String(toolCall.id),
-        name: String(toolCall.name),
-        arguments: toolCall.arguments ?? {},
-      })),
+      type: "toolCall",
+      id: String(toolCall.id),
+      name: String(toolCall.name),
+      arguments: toolCall.arguments ?? {},
+    })),
   );
   if (content.length === 0) content.push({ type: "text", text: "" });
   const stopReason = result.stop_reason ?? (toolCalls.length > 0 ? "toolUse" : "stop");
@@ -161,248 +156,199 @@ function makeErrorMessage(message, stopReason = "error") {
   };
 }
 
-function stepPayload(session, generationId, environmentResult, invalidAction = false) {
-  return {
-    type: "step_complete",
-    session_id: session.id,
-    generation_id: generationId,
-    reward: Number(environmentResult.reward ?? 0),
-    terminated: Boolean(environmentResult.terminated),
-    truncated: Boolean(environmentResult.truncated),
-    invalid_action: invalidAction,
-    diagnostics: { ...session.diagnostics },
-    info: environmentResult.info ?? {},
-  };
-}
-
-function applyTurnLimit(session, environmentResult) {
-  if (
-    environmentResult.terminated ||
-    environmentResult.truncated ||
-    session.turnCount < session.maxTurns
-  ) {
-    return environmentResult;
+async function loadCodingAgent(entrypoint) {
+  if (!entrypoint) {
+    throw new Error(
+      "PI_CODING_AGENT_ENTRYPOINT is required; point it to pi/packages/coding-agent/dist/index.js",
+    );
   }
-  return {
-    ...environmentResult,
-    truncated: true,
-    info: { ...(environmentResult.info ?? {}), pi_max_turns: true },
-  };
+  return import(pathToFileURL(resolve(entrypoint)).href);
 }
 
-async function executeEnvironmentAction(session, generationId, action) {
-  const isToolAction = typeof action === "string" && action.trimStart().startsWith("{");
-  if (isToolAction) session.diagnostics.valid_tool_calls += 1;
-  else session.diagnostics.text_actions += 1;
-  if (session.seenActions.has(action)) session.diagnostics.repeated_actions += 1;
-  session.seenActions.add(action);
-  if (session.lastActionInvalid) session.diagnostics.failure_recoveries += 1;
-  session.lastActionInvalid = false;
-  const hostResult = await requestHost(session.id, "environment_request", {
-    generation_id: generationId,
-    action,
-  });
-  const result = applyTurnLimit(session, hostResult);
-  session.environmentCompleted.add(generationId);
-  session.lastEnvironmentResult = result;
-  emit(stepPayload(session, generationId, result));
-  return result;
-}
-
-function makeRemoteTool(session, schema) {
-  return {
-    name: schema.name,
-    label: schema.name,
-    description: schema.description ?? "",
-    parameters: schema.parameters ?? { type: "object", properties: {} },
-    executionMode: "sequential",
-    execute: async (_toolCallId, params) => {
-      const generationId = session.currentGenerationId;
-      if (!generationId) throw new Error("Tool execution has no active generation");
-      const action = JSON.stringify({ name: schema.name, arguments: params });
-      const result = await executeEnvironmentAction(session, generationId, action);
-      return {
-        content: [{ type: "text", text: String(result.observation ?? "") }],
-        details: result.info ?? {},
-        terminate: Boolean(result.terminated || result.truncated),
-      };
-    },
-  };
+function serializable(value) {
+  try {
+    JSON.stringify(value);
+    return value;
+  } catch {
+    return String(value);
+  }
 }
 
 async function createSession(command) {
   const id = String(command.session_id);
+  if (sessions.size > 0) {
+    throw new Error(
+      "The canonical tau2 Telecom extension is process-scoped; run one Pi sidecar per trajectory",
+    );
+  }
   if (sessions.has(id)) throw new Error(`Session already exists: ${id}`);
-  const skillsDir = String(command.skills_dir);
-  const env = new NodeExecutionEnv({ cwd: process.cwd() });
-  const loaded = await loadSkills(env, skillsDir);
-  if (loaded.diagnostics.length > 0) {
-    throw new Error(`Pi skill loading failed: ${JSON.stringify(loaded.diagnostics)}`);
-  }
-  if (loaded.skills.length === 0) {
-    throw new Error(`Pi skill loading produced no skills from ${skillsDir}`);
-  }
-  const visibleSkills = formatSkillsForSystemPrompt(loaded.skills);
-  const invokedSkills = loaded.skills.map((skill) => formatSkillInvocation(skill)).join("\n\n");
-  const systemPrompt = [
-    "You are a customer-service agent operating the tau2 Telecom environment.",
-    String(command.domain_policy ?? ""),
-    visibleSkills,
-    invokedSkills,
-    "Use at most one tool call per assistant response. Do not mix user-facing text and a tool call.",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
 
-  const session = {
+  const tau2Root = String(command.tau2_root ?? "");
+  if (!tau2Root) throw new Error("start_session.tau2_root is required");
+  const trainingExtension = String(
+    command.training_extension ?? resolve(tau2Root, ".pi", "extensions", "agent-r1-training.ts"),
+  );
+  const agentDir = String(command.agent_dir ?? resolve(tau2Root, ".pi", "agent"));
+  const entrypoint = String(
+    command.pi_coding_agent_entrypoint ?? process.env.PI_CODING_AGENT_ENTRYPOINT ?? "",
+  );
+  const { createAgentSession, DefaultResourceLoader, SessionManager } =
+    await loadCodingAgent(entrypoint);
+
+  process.env.TAU2_TELECOM_TASK_ID = String(command.task_id ?? process.env.TAU2_TELECOM_TASK_ID ?? "");
+  if (!process.env.TAU2_TELECOM_TASK_ID.trim()) {
+    throw new Error("start_session.task_id is required");
+  }
+
+  const state = {
     id,
     maxTurns: Number(command.max_turns ?? 30),
     turnCount: 0,
     currentGenerationId: null,
-    environmentCompleted: new Set(),
-    lastEnvironmentResult: null,
-    lastActionInvalid: false,
-    seenActions: new Set(),
-    diagnostics: {
-      valid_tool_calls: 0,
-      invalid_tool_calls: 0,
-      text_actions: 0,
-      repeated_actions: 0,
-      failure_recoveries: 0,
-    },
     closed: false,
-    agent: null,
+    evaluation: null,
+    diagnostics: {
+      generation_requests: 0,
+      completed_turns: 0,
+      tool_turns: 0,
+      text_turns: 0,
+    },
   };
-  const tools = command.tools.map((schema) => makeRemoteTool(session, schema));
-  const agent = new Agent({
-    initialState: {
-      systemPrompt,
-      model: BRIDGE_MODEL,
-      thinkingLevel: "off",
-      tools,
-    },
-    toolExecution: "sequential",
-    beforeToolCall: async ({ assistantMessage }) => {
-      const toolCalls = assistantMessage.content.filter((item) => item.type === "toolCall");
-      const text = contentText(assistantMessage.content).trim();
-      if (toolCalls.length > 1) {
-        return { block: true, reason: "tau2 Telecom permits one tool call per assistant response" };
-      }
-      if (text && toolCalls.length > 0) {
-        return { block: true, reason: "Do not mix user-facing text and a tool call" };
-      }
-      return undefined;
-    },
-    shouldStopAfterTurn: () =>
-      session.closed ||
-      session.turnCount >= session.maxTurns ||
-      Boolean(session.lastEnvironmentResult?.terminated || session.lastEnvironmentResult?.truncated),
-    streamFn: (_model, context, options) => {
-      const generationId = `${id}:generation:${++session.turnCount}`;
-      session.currentGenerationId = generationId;
-      const converted = contextToOpenAi(context);
-      const anchorObs = canonicalAnchor(converted.messages, converted.tools);
-      const stream = createAssistantMessageEventStream();
-      const abortSignal = options?.signal;
-      const pushFailure = (error, aborted) => {
-        const reason = aborted ? "aborted" : "error";
-        stream.push({
-          type: "error",
-          reason,
-          error: makeErrorMessage(errorMessage(error), reason),
-        });
-      };
-      if (abortSignal?.aborted) {
-        pushFailure("Generation aborted", true);
-        return stream;
-      }
-      requestHost(
-        id,
-        "generation_request",
-        {
-          generation_id: generationId,
-          messages: converted.messages,
-          tools: converted.tools,
-          anchor_obs: anchorObs,
-        },
-        abortSignal,
-      )
-        .then((result) => {
-          const message = makeAssistantMessage(result);
-          if (message.stopReason === "error" || message.stopReason === "aborted") {
-            stream.push({ type: "error", reason: message.stopReason, error: message });
-          } else {
-            stream.push({ type: "done", reason: message.stopReason, message });
-          }
-        })
-        .catch((error) => {
-          pushFailure(error, abortSignal?.aborted || errorMessage(error).includes("aborted"));
-        });
-      return stream;
-    },
-  });
-  session.agent = agent;
-  agent.subscribe(async (event) => {
-    if (event.type !== "turn_end" || event.message.role !== "assistant") return;
-    const generationId = session.currentGenerationId;
-    if (!generationId) return;
-    const toolCalls = event.message.content.filter((item) => item.type === "toolCall");
-    if (toolCalls.length === 0) {
-      const result = await executeEnvironmentAction(session, generationId, contentText(event.message.content));
-      if (!result.terminated && !result.truncated && session.turnCount < session.maxTurns) {
-        agent.followUp({
-          role: "user",
-          content: [{ type: "text", text: String(result.observation ?? "") }],
-          timestamp: Date.now(),
-        });
-      }
-      return;
-    }
-    if (!session.environmentCompleted.has(generationId)) {
-      session.diagnostics.invalid_tool_calls += 1;
-      session.lastActionInvalid = true;
-      const result = applyTurnLimit(session, {
-        reward: 0,
-        terminated: false,
-        truncated: false,
-        info: { pi_tool_errors: event.toolResults.map((item) => contentText(item.content)) },
-      });
-      session.environmentCompleted.add(generationId);
-      session.lastEnvironmentResult = result;
-      emit(
-        stepPayload(
-          session,
-          generationId,
-          result,
-          true,
-        ),
-      );
-    }
-  });
-  sessions.set(id, session);
-  emit({ type: "session_started", session_id: id, skill_count: loaded.skills.length });
+  sessions.set(id, state);
 
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: tau2Root,
+    agentDir,
+    noExtensions: true,
+    additionalExtensionPaths: [trainingExtension],
+  });
+  await resourceLoader.reload();
+  const extensionErrors = resourceLoader.getExtensions().errors ?? [];
+  if (extensionErrors.length > 0) {
+    throw new Error(`Pi extension loading failed: ${JSON.stringify(extensionErrors)}`);
+  }
+
+  const { session } = await createAgentSession({
+    cwd: tau2Root,
+    agentDir,
+    model: BRIDGE_MODEL,
+    thinkingLevel: "off",
+    noTools: "builtin",
+    resourceLoader,
+    sessionManager: SessionManager.inMemory(tau2Root),
+  });
+  state.session = session;
+  session.agent.streamFunction = (_model, context, options) => {
+    const generationId = `${id}:generation:${++state.turnCount}`;
+    state.currentGenerationId = generationId;
+    state.diagnostics.generation_requests += 1;
+    const converted = contextToOpenAi(context);
+    const stream = createAssistantMessageEventStream();
+    const abortSignal = options?.signal;
+    const fail = (error, aborted = false) => {
+      const reason = aborted ? "aborted" : "error";
+      stream.push({
+        type: "error",
+        reason,
+        error: makeErrorMessage(errorMessage(error), reason),
+      });
+    };
+    if (abortSignal?.aborted) {
+      fail("Generation aborted", true);
+      return stream;
+    }
+    requestHost(
+      id,
+      "generation_request",
+      {
+        generation_id: generationId,
+        messages: converted.messages,
+        tools: converted.tools,
+        anchor_obs: canonicalAnchor(converted.messages, converted.tools),
+      },
+      abortSignal,
+    )
+      .then((result) => {
+        const message = makeAssistantMessage(result);
+        if (message.stopReason === "error" || message.stopReason === "aborted") {
+          stream.push({ type: "error", reason: message.stopReason, error: message });
+        } else {
+          stream.push({ type: "done", reason: message.stopReason, message });
+        }
+      })
+      .catch((error) => fail(error, abortSignal?.aborted || errorMessage(error).includes("aborted")));
+    return stream;
+  };
+  session.agent.shouldStopAfterTurn = () => state.closed || state.turnCount >= state.maxTurns;
+
+  session.subscribe((event) => {
+    if (event.type === "entry_appended" && event.entry?.type === "custom") {
+      if (event.entry.customType === "agent-r1-evaluation") {
+        state.evaluation = event.entry.data;
+        emit({
+          type: "evaluation_result",
+          session_id: id,
+          result: serializable(event.entry.data),
+        });
+      }
+    }
+  });
+  session.agent.subscribe((event) => {
+    if (event.type !== "turn_end" || event.message?.role !== "assistant") return;
+    const generationId = state.currentGenerationId;
+    if (!generationId) return;
+    const hasToolCalls = Array.isArray(event.message.content) &&
+      event.message.content.some((item) => item?.type === "toolCall");
+    if (hasToolCalls) state.diagnostics.tool_turns += 1;
+    else state.diagnostics.text_turns += 1;
+    state.diagnostics.completed_turns += 1;
+    emit({
+      type: "step_complete",
+      session_id: id,
+      generation_id: generationId,
+      reward: 0,
+      terminated: false,
+      truncated: state.turnCount >= state.maxTurns,
+      invalid_action: false,
+      diagnostics: { ...state.diagnostics },
+      assistant_message: serializable(event.message),
+      tool_results: serializable(event.toolResults ?? []),
+    });
+  });
+
+  emit({ type: "session_started", session_id: id, protocol_version: 2, runtime: "pi-coding-agent" });
   try {
-    await agent.prompt(String(command.initial_observation ?? ""));
+    await session.bindExtensions({ mode: "rpc" });
+    // The canonical extension queues its task prompt from session_start. Waiting
+    // here lets the official Pi loop consume that prompt and all follow-ups.
+    await session.waitForIdle();
+    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    session.dispose();
     emit({
       type: "session_complete",
       session_id: id,
-      terminated: Boolean(session.lastEnvironmentResult?.terminated),
-      truncated:
-        Boolean(session.lastEnvironmentResult?.truncated) ||
-        (!session.lastEnvironmentResult?.terminated && session.turnCount >= session.maxTurns),
-      turns: session.turnCount,
+      terminated: false,
+      truncated: state.turnCount >= state.maxTurns,
+      turns: state.turnCount,
+      diagnostics: { ...state.diagnostics },
     });
   } catch (error) {
     emit({ type: "session_error", session_id: id, error: errorMessage(error) });
+    try {
+      session.dispose();
+    } catch {
+      // Best-effort cleanup; the host still receives the session_error above.
+    }
+  } finally {
+    sessions.delete(id);
   }
 }
 
 function closeSession(sessionId) {
-  const session = sessions.get(sessionId);
-  if (!session) return;
-  session.closed = true;
-  session.agent?.abort();
+  const state = sessions.get(sessionId);
+  if (!state) return;
+  state.closed = true;
+  state.session?.agent.abort();
   sessions.delete(sessionId);
   for (const [requestId, pending] of pendingHostRequests.entries()) {
     if (requestId.startsWith(`${sessionId}:`)) {
@@ -427,11 +373,7 @@ async function handleCommand(message) {
   }
   if (message.type === "start_session") {
     void createSession(message).catch((error) => {
-      emit({
-        type: "session_error",
-        session_id: String(message.session_id),
-        error: errorMessage(error),
-      });
+      emit({ type: "session_error", session_id: String(message.session_id), error: errorMessage(error) });
     });
     return;
   }
@@ -462,11 +404,6 @@ input.on("line", (line) => {
   });
 });
 
-emit({ type: "ready", protocol_version: 1, pi_agent_core: "0.84.4" });
+emit({ type: "ready", protocol_version: 2, pi_runtime: "pi-coding-agent" });
 
-export {
-  applyTurnLimit,
-  canonicalAnchor,
-  contextToOpenAi,
-  makeAssistantMessage,
-};
+export { canonicalAnchor, contextToOpenAi, makeAssistantMessage };

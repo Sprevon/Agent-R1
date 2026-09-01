@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,12 @@ class PiSidecarClient:
         node_binary: str,
         entrypoint: str,
         startup_timeout: float = 30.0,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self.node_binary = node_binary
         self.entrypoint = str(Path(entrypoint).expanduser().resolve())
         self.startup_timeout = startup_timeout
+        self.env = {str(key): str(value) for key, value in (env or {}).items()}
         self._process: asyncio.subprocess.Process | None = None
         self._write_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
@@ -85,6 +88,7 @@ class PiSidecarClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=16 * 1024 * 1024,
+                env={**os.environ, **self.env},
             )
             self._reader_task = asyncio.create_task(self._read_stdout())
             self._stderr_task = asyncio.create_task(self._read_stderr())
