@@ -1,47 +1,150 @@
-# Pi harness + tau2 Telecom + OPD/GiGPO
+# Pi harness + tau2 Telecom + Agent-R1 OPD/GiGPO
 
-This recipe keeps model generation and optimization in Agent-R1 while delegating the agent runtime to Pi's published
-SDK. The Node sidecar instantiates `@earendil-works/pi-agent-core`'s `Agent`, loads Pi skills with its skill loader,
-validates and executes tool calls through Pi, and sends only generation/environment requests over JSONL. Python does
-not reproduce Pi's turn loop.
+This recipe keeps LLM generation and RL training in Agent-R1, while using the
+official Pi coding-agent runtime for the complete agent loop. tau2 remains the
+single owner of Telecom task data, task initialization, database state, tool
+implementations, and evaluation.
 
-The local Pi 0.84.4 checkout also contains a higher-level `AgentHarness`, but its execution methods (including
-`prompt`) currently raise `HarnessNotImplemented`. This integration therefore uses the runnable `Agent` loop plus the
-harness skill/environment APIs. It can move up to `AgentHarness` after those methods become executable without
-changing the Agent-R1/tau2 boundary.
+The important rule is:
+
+```text
+Agent-R1        generates tokens and builds training steps
+Pi              owns skills, extensions, transcript, tools, and the agent loop
+tau2            owns tasks, DB state, tool execution, and reward evaluation
+```
+
+## Two Agent-R1 paths
+
+Agent-R1's generic environment path is still available for other recipes:
+
+```text
+AgentFlowManager
+  └─ AgentEnvLoop
+       └─ AgentEnv
+            └─ ToolEnv (one possible AgentEnv implementation)
+```
+
+`AgentEnvLoop` is an `AgentFlow` implementation; it is not a mandatory layer
+below every flow. The Telecom recipe uses a dedicated `PiTauAgentFlow` instead:
+
+```text
+AgentFlowManager
+  └─ PiTauAgentFlow
+       └─ PiSidecarClient
+            └─ Pi createAgentSession()
+                 ├─ DefaultResourceLoader
+                 │    ├─ telecom-solo-support skill
+                 │    └─ Agent-R1 training wrapper extension
+                 ├─ official Pi agent loop
+                 └─ tau2-telecom extension
+                      └─ tau2 pi_bridge
+                           └─ TelecomEnvironment + DB + tools
+```
+
+This bypasses `AgentEnvLoop` deliberately. A Pi turn is not just one text
+action passed to `AgentEnv.step()`: Pi must append the assistant message,
+execute the registered tool, append the tool result, and decide whether to
+continue. Keeping that loop inside Pi avoids reimplementing Pi semantics in
+Python.
+
+## Runtime and training boundaries
+
+The sidecar uses the official `@earendil-works/pi-coding-agent` SDK. It loads
+the training wrapper through `DefaultResourceLoader`, binds extensions in
+`rpc` mode, and replaces only `session.agent.streamFunction` so Agent-R1 can
+provide the actual model generation.
+
+```text
+Pi session
+  ├─ session_start
+  │    └─ load tau2 task, register tools, activate task allowlist, send skill prompt
+  ├─ generation_request
+  │    └─ Agent-R1 server_manager.generate()
+  ├─ Pi executes tau2 tool calls internally
+  ├─ step_complete
+  │    └─ Agent-R1 records this Pi turn
+  └─ session_shutdown
+       └─ tau2 evaluator → evaluation_result
+```
+
+There are two different kinds of state:
+
+1. **Task execution state** belongs to tau2. `tau2.domains.telecom.pi_bridge`
+   owns the live `TelecomEnvironment`, task initial state, DB state, tool
+   calls, assistant-text history, and final evaluator.
+
+2. **Training recording state** belongs to Agent-R1. `PiTrainingRecorder`
+   stores prompt/response token IDs, response logprobs, routed experts, Pi
+   turn metadata, and the terminal reward. It does not call tau2 and does not
+   calculate advantage.
+
+The recorder produces `AgentFlowStep` objects. Agent-R1's normal batching and
+PPO/GRPO/GiGPO code later converts the terminal reward into reward tensors and
+computes advantages.
+
+The current sidecar is one-trajectory-per-process because the canonical tau2
+bridge keeps task/environment state at extension-process scope. This prevents
+different trajectories from sharing a Telecom DB or active task.
+
+## Training wrapper extension
+
+The canonical interactive extension is:
+
+```ts
+const telecom = createTau2TelecomExtension();
+export default telecom.extension;
+```
+
+Training needs to inject a task ID and receive evaluation results through the
+Pi session, so it uses:
+
+```text
+agent-r1-training.ts
+  └─ createTau2TelecomExtension({
+       taskId,
+       autoPrompt: true,
+       onEvaluation: result => pi.appendEntry(...)
+     })
+```
+
+The wrapper does not duplicate Telecom tools, skills, DB logic, or reward
+logic. It only adapts canonical tau2 extension configuration and publishes
+the evaluator result as a Pi session entry for Agent-R1.
+
+## Event protocol
+
+The Python/Node boundary is JSONL. The training path uses:
+
+```text
+generation_request
+  → response { text, tool_calls, stop_reason }
+  → step_complete
+  → ...
+  → evaluation_result
+  → session_complete
+```
+
+`environment_request` is intentionally not part of this path. Tool calls are
+executed by Pi's registered tau2 extension, not by `PiTauAgentFlow` or a
+second Python-side environment.
 
 ## Fixed versions and model profiles
 
-- Pi agent SDK: `@earendil-works/pi-agent-core==0.84.4`
-- tau2: Git tag `v1.0.1`, with the public `AgentGymEnv`
-- OPD verl: commit `5779c7c6782733f77ef640f557bea572dfeacc12`
+- Pi coding-agent SDK: `@earendil-works/pi-coding-agent==0.84.4`
+- tau2: Telecom task/bridge code in the configured `TAU2_BENCH_ROOT`
+- OPD verl: the version pinned by this Agent-R1 checkout
 - formal student: `Qwen/Qwen3-0.6B`, non-thinking
 - formal teacher: `Qwen/Qwen3-8B`
-- 3080 smoke teacher override: `Qwen/Qwen3-0.6B`
 
-The pinned OPD implementation uses a dedicated Ray GPU pool for the teacher. A full OPD optimizer-update smoke
-therefore needs two visible GPUs even when both models are 0.6B. Do not replace this with an ad-hoc Python teacher
-loop merely to fit a one-GPU host.
-
-## Runtime boundary
-
-```text
-Agent-R1 rollout server                 tau2 AgentGymEnv
-       ^                                      ^
-       | generation_request                   | environment_request
-       v                                      v
-                  Pi Agent SDK sidecar
-          skills + transcript + tool runtime
-```
-
-Each GiGPO trajectory gets an independent `AgentGymEnv` and Pi `Agent` session. Sessions share only the long-lived
-sidecar process. The `anchor_obs` used for GiGPO is a canonical serialization of the Pi-visible transcript and tool
-names before the action.
+The formal OPD setup uses a dedicated Ray GPU pool for the teacher. A complete
+optimizer-update smoke therefore needs the configured multi-GPU environment;
+CPU-only checks do not establish training correctness.
 
 ## Prepare a Linux environment
 
-Use Python 3.12 or 3.13 and Node 22.19 or newer. Install the repository's normal CUDA/PyTorch/vLLM dependencies first,
-then install the pinned additions:
+Run these commands on the remote Linux training host, not on the Mac checkout.
+Python/Node dependencies and Pi's `coding-agent/dist/index.js` must be
+available before a real Pi session can start.
 
 ```bash
 bash scripts/install_pi_tau_deps.sh
@@ -49,18 +152,17 @@ python3 scripts/check_pi_tau_environment.py --student Qwen/Qwen3-0.6B --teacher 
 npm --prefix recipes/tau2_telecom/pi_sidecar test
 ```
 
-The installer adds the Pi npm packages, tau2, and the OPD-compatible verl pin. It assumes the repository's normal
-training dependencies are already present; it does not select a CUDA/PyTorch/vLLM build for the machine.
-
-tau2 drives a separate user simulator through LiteLLM. Configure its provider key and optionally override:
+Set the paths used by the split runtime when they are not at the defaults:
 
 ```bash
-export TAU2_USER_LLM='openai/gpt-4.1-mini'
-export TAU2_USER_LLM_ARGS='{"temperature":0.0}'
+export TAU2_BENCH_ROOT=/root/autodl-tmp/code/tau2-bench-official
+export PI_CODING_AGENT_ENTRYPOINT=/root/autodl-tmp/code/pi/packages/coding-agent/dist/index.js
+export PI_TAU_TRAINING_EXTENSION="$TAU2_BENCH_ROOT/.pi/extensions/agent-r1-training.ts"
+export PI_AGENT_DIR="$TAU2_BENCH_ROOT/.pi/agent"
 ```
 
-For an OpenAI-compatible local service, put `api_base`, `api_key`, and any provider-specific arguments in
-`TAU2_USER_LLM_ARGS`. This user simulator is not the OPD teacher.
+The Telecom bridge runs in tau2's solo workflow mode. It does not use a
+separate user simulator in this training path.
 
 ## Data
 
@@ -77,23 +179,33 @@ Create a one-task-per-split dataset for the 3080 smoke:
 bash examples/tau2_telecom/prepare_3080_smoke_data.sh
 ```
 
-The generated `manifest.json` records the exact task IDs. Keep train tasks out of held-out final evaluation.
+The generated `manifest.json` records the exact task IDs. Keep train tasks
+out of held-out final evaluation.
 
 ## 3080 smoke gate
 
-On a host with two visible 3080-class GPUs, export `TAU2_USER_LLM` and simulator credentials first, then run the 0.6B/0.6B OPD update and a one-batch GiGPO update. The script calls `scripts/check_pi_tau_environment.py` before training and fails if Pi, tau2, OPD, CUDA, or the user simulator is missing:
+After the Pi checkout has its dependencies and build output, run:
 
 ```bash
 bash examples/tau2_telecom/run_3080_smoke.sh all
 ```
 
-The acceptance gate is stricter than process exit: inspect logs for finite loss, non-empty response masks, exact OPD
-token alignment, at least one optimizer update, checkpoint creation, Pi session completion, and tau2 reward output.
-The GiGPO log exposes singleton and zero-variance group fractions under `gigpo/*`.
+The acceptance gate is stricter than process exit. Inspect logs for:
+
+- finite loss;
+- non-empty `response_mask`;
+- valid Pi tool calls and completed Pi session;
+- tau2 evaluator output and reward breakdown;
+- exact OPD token alignment;
+- at least one optimizer update;
+- checkpoint creation.
+
+The GiGPO log also exposes singleton and zero-variance group fractions under
+`gigpo/*`.
 
 ## Dual-5090 formal runs
 
-Run formal OPD with the default Qwen3-8B teacher:
+Run formal OPD with the default teacher:
 
 ```bash
 bash examples/tau2_telecom/run_opd.sh
@@ -105,28 +217,21 @@ Run direct GiGPO from the base student:
 bash examples/tau2_telecom/run_gigpo.sh
 ```
 
-For OPD to GiGPO, point at the `hf_model` exported by the OPD actor checkpoint. This intentionally starts a fresh
-GiGPO optimizer and avoids pretending that a one-student-GPU FSDP optimizer state can resume unchanged at world size
-two:
+For OPD to GiGPO, point at the `hf_model` exported by the OPD actor
+checkpoint. This starts a fresh GiGPO optimizer and avoids resuming an FSDP
+optimizer state at a different world size:
 
 ```bash
 OPD_HF_MODEL=/absolute/path/to/opd/checkpoint/actor/hf_model \
   bash examples/tau2_telecom/run_opd_then_gigpo.sh
 ```
 
-Before each retained run, capture the exact software and hardware state:
-
-```bash
-python3 scripts/capture_pi_tau_manifest.py \
-  --output artifacts/manifests/formal-opd.json \
-  --student Qwen/Qwen3-0.6B \
-  --teacher Qwen/Qwen3-8B \
-  --task_split train
-```
-
 ## Evidence status
 
-Mac checks can validate Python compilation, JSONL routing, schema conversion, shell syntax, and Pi sidecar JavaScript
-syntax. They cannot establish that tau2 simulations, vLLM rollout, OPD updates, GPU allocation, or checkpoint handoff
-work. Record those as verified only after the 3080 gate succeeds, then repeat the formal profile on the dual 5090
-machine.
+CPU-only checks can validate Python compilation, JSONL routing, schema
+conversion, shell syntax, and sidecar JavaScript syntax. They cannot prove
+that Pi's real `createAgentSession` loads the extension, that tau2 executes a
+complete trajectory, or that vLLM/OPD updates and checkpoint handoff work.
+
+Record those as verified only after the real Pi session and the GPU smoke gate
+both succeed.
