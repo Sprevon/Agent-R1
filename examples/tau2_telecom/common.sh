@@ -14,7 +14,6 @@ if [[ ! -d "$TAU2_BENCH_ROOT/.pi/skills" && -d "$PROJECT_DIR/../tau2-bench/.pi/s
   TAU2_BENCH_ROOT="$PROJECT_DIR/../tau2-bench"
 fi
 export TAU2_BENCH_ROOT
-export PI_TAU_SKILLS_DIR="${PI_TAU_SKILLS_DIR:-$TAU2_BENCH_ROOT/.pi/skills}"
 export PI_CODING_AGENT_ENTRYPOINT="${PI_CODING_AGENT_ENTRYPOINT:-/root/autodl-tmp/code/pi/packages/coding-agent/dist/index.js}"
 export PI_TAU_TRAINING_EXTENSION="${PI_TAU_TRAINING_EXTENSION:-$TAU2_BENCH_ROOT/.pi/extensions/agent-r1-training.ts}"
 export PI_AGENT_DIR="${PI_AGENT_DIR:-$TAU2_BENCH_ROOT/.pi/agent}"
@@ -55,18 +54,6 @@ require_file "$VAL_PATH"
 require_file "$PI_TAU_SIDECAR_ENTRYPOINT"
 require_file "$PI_CODING_AGENT_ENTRYPOINT"
 require_file "$PI_TAU_TRAINING_EXTENSION"
-
-solo_mode="$(printf '%s' "${TAU2_SOLO_MODE:-false}" | tr '[:upper:]' '[:lower:]')"
-if [[ "$solo_mode" != "true" && "$solo_mode" != "1" && "$solo_mode" != "yes" && "$solo_mode" != "on" ]]; then
-  if [[ -z "${TAU2_USER_LLM:-}" ]]; then
-    echo "TAU2_USER_LLM is unset. The user simulator is a separate OpenAI-compatible dependency, not the OPD teacher." >&2
-    exit 1
-  fi
-  if [[ -z "${OPENAI_API_KEY:-}" && "${TAU2_USER_LLM_ARGS:-}" != *api_key* ]]; then
-    echo "tau2 user simulator credentials are missing. Set OPENAI_API_KEY or put api_key in TAU2_USER_LLM_ARGS." >&2
-    exit 1
-  fi
-fi
 
 if [[ ! -d "$PROJECT_DIR/recipes/tau2_telecom/pi_sidecar/node_modules" ]]; then
   echo "Pi sidecar dependencies are missing." >&2
