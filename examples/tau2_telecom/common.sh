@@ -29,6 +29,7 @@ if [[ -z "$PYTHON_BIN" ]]; then
   echo "No usable Python interpreter found; set PYTHON_BIN explicitly." >&2
   exit 1
 fi
+export TAU2_PI_PYTHON="${TAU2_PI_PYTHON:-$PYTHON_BIN}"
 export PYTHONPATH="$PROJECT_DIR:$PROJECT_DIR/recipes:$TAU2_BENCH_ROOT/src:/root/autodl-tmp/code/verl${PYTHONPATH:+:$PYTHONPATH}"
 
 CONFIG_PATH="${PI_TAU_CONFIG_PATH:-$PROJECT_DIR/recipes/tau2_telecom/base.yaml}"

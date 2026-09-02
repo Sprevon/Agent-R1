@@ -57,7 +57,8 @@ provide the actual model generation.
 ```text
 Pi session
   ├─ session_start
-  │    └─ load tau2 task, register tools, activate task allowlist, send skill prompt
+  │    └─ load tau2 task, register tools, activate task allowlist, publish skill prompt
+  ├─ Agent-R1 sidecar awaits session.prompt(canonical_prompt)
   ├─ generation_request
   │    └─ Agent-R1 server_manager.generate()
   ├─ Pi executes tau2 tool calls internally
@@ -102,14 +103,19 @@ Pi session, so it uses:
 agent-r1-training.ts
   └─ createTau2TelecomExtension({
        taskId,
-       autoPrompt: true,
+       autoPrompt: false,
+       failFastOnStartError: true,
+       onTaskLoaded: task => pi.appendEntry(canonicalPrompt),
        onEvaluation: result => pi.appendEntry(...)
      })
 ```
 
 The wrapper does not duplicate Telecom tools, skills, DB logic, or reward
 logic. It only adapts canonical tau2 extension configuration and publishes
-the evaluator result as a Pi session entry for Agent-R1.
+the canonical task prompt and evaluator result as Pi session entries for
+Agent-R1. The sidecar awaits `session.prompt()` directly so model/provider,
+skill expansion, and extension failures cannot silently produce a zero-turn
+trajectory.
 
 ## Event protocol
 
@@ -159,7 +165,13 @@ export TAU2_BENCH_ROOT=/root/autodl-tmp/code/tau2-bench-official
 export PI_CODING_AGENT_ENTRYPOINT=/root/autodl-tmp/code/pi/packages/coding-agent/dist/index.js
 export PI_TAU_TRAINING_EXTENSION="$TAU2_BENCH_ROOT/.pi/extensions/agent-r1-training.ts"
 export PI_AGENT_DIR="$TAU2_BENCH_ROOT/.pi/agent"
+export TAU2_PI_PYTHON=/root/envs/toolcall/bin/python
 ```
+
+`TAU2_PI_PYTHON` must point to an interpreter that can import the configured
+tau2 checkout. `examples/tau2_telecom/common.sh` defaults it to the resolved
+`PYTHON_BIN`; export it explicitly when Pi's Node process does not inherit a
+usable bare `python` command.
 
 The Telecom bridge runs in tau2's solo workflow mode. It does not use a
 separate user simulator in this training path.
@@ -182,13 +194,37 @@ bash examples/tau2_telecom/prepare_3080_smoke_data.sh
 The generated `manifest.json` records the exact task IDs. Keep train tasks
 out of held-out final evaluation.
 
-## 3080 smoke gate
+## Three-GPU 4080 smoke gate
 
-After the Pi checkout has its dependencies and build output, run:
+After the Pi checkout has its dependencies and build output, the startup-fit
+Qwen3 0.6B-student/4B-teacher launch profile is:
 
 ```bash
-bash examples/tau2_telecom/run_3080_smoke.sh all
+CUDA_VISIBLE_DEVICES=0,1,2 \
+PYTHON_BIN=/root/envs/toolcall/bin/python \
+TAU2_PI_PYTHON=/root/envs/toolcall/bin/python \
+TAU2_BENCH_ROOT=/root/autodl-tmp/code/tau2-bench-official \
+PI_CODING_AGENT_ENTRYPOINT=/root/autodl-tmp/code/pi/packages/coding-agent/dist/index.js \
+STUDENT_MODEL=/root/autodl-tmp/models/Qwen3-0.6B \
+TEACHER_MODEL=/root/autodl-tmp/models/Qwen3-4B \
+STUDENT_GPUS_PER_NODE=2 TEACHER_GPUS_PER_NODE=1 \
+TAU2_TRAIN_PATH=/root/autodl-tmp/data/tau2_telecom_smoke_2/train.parquet \
+TAU2_VAL_PATH=/root/autodl-tmp/data/tau2_telecom_smoke_2/test.parquet \
+TAU2_TRAIN_BATCH_SIZE=2 TAU2_PPO_MINI_BATCH_SIZE=2 \
+TAU2_MAX_PROMPT_LEN=24000 TAU2_MAX_RESPONSE_LEN=128 \
+AGENT_FLOW_WORKERS=1 \
+TAU2_TEACHER_GPU_MEMORY_UTILIZATION=0.60 \
+EXP_NAME=qwen3_0p6b_teacher4b_realpi_smoke \
+SAVE_FREQ=1 TEST_FREQ=1 TOTAL_EPOCHS=1 \
+bash examples/tau2_telecom/run_opd.sh \
+  trainer.total_training_steps=1 \
+  trainer.default_local_dir=/root/autodl-tmp/ckpt/tau2-pi-opd-0p6-4b-realpi-smoke
 ```
+
+The teacher needs `0.60` on the observed 32 GiB RTX 4080 SUPER: `0.45` left
+only about 1.03 GiB for KV cache while the 24,129-token profile required about
+3.32 GiB. Treat model and data paths above as host-specific inputs, not files
+created by this recipe.
 
 The acceptance gate is stricter than process exit. Inspect logs for:
 

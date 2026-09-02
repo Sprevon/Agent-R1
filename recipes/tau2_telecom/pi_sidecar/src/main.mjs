@@ -1,7 +1,10 @@
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import {
+  createAssistantMessageEventStream,
+  createProvider,
+} from "@earendil-works/pi-ai";
 
 const EMPTY_USAGE = {
   input: 0,
@@ -156,6 +159,35 @@ function makeErrorMessage(message, stopReason = "error") {
   };
 }
 
+function createBridgeProvider() {
+  const unavailableStream = () => {
+    const stream = createAssistantMessageEventStream();
+    stream.push({
+      type: "error",
+      reason: "error",
+      error: makeErrorMessage(
+        "Agent-R1 bridge provider must be invoked through session.agent.streamFunction",
+      ),
+    });
+    return stream;
+  };
+  return createProvider({
+    id: BRIDGE_MODEL.provider,
+    name: "Agent-R1 host bridge",
+    auth: {
+      apiKey: {
+        name: "Agent-R1 host bridge",
+        resolve: async () => ({ auth: {} }),
+      },
+    },
+    models: [BRIDGE_MODEL],
+    api: {
+      stream: unavailableStream,
+      streamSimple: unavailableStream,
+    },
+  });
+}
+
 async function loadCodingAgent(entrypoint) {
   if (!entrypoint) {
     throw new Error(
@@ -192,7 +224,7 @@ async function createSession(command) {
   const entrypoint = String(
     command.pi_coding_agent_entrypoint ?? process.env.PI_CODING_AGENT_ENTRYPOINT ?? "",
   );
-  const { createAgentSession, DefaultResourceLoader, SessionManager } =
+  const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager } =
     await loadCodingAgent(entrypoint);
 
   process.env.TAU2_TELECOM_TASK_ID = String(command.task_id ?? process.env.TAU2_TELECOM_TASK_ID ?? "");
@@ -207,6 +239,8 @@ async function createSession(command) {
     currentGenerationId: null,
     closed: false,
     evaluation: null,
+    taskPrompt: null,
+    extensionErrors: [],
     diagnostics: {
       generation_requests: 0,
       completed_turns: 0,
@@ -228,12 +262,16 @@ async function createSession(command) {
     throw new Error(`Pi extension loading failed: ${JSON.stringify(extensionErrors)}`);
   }
 
+  const modelRuntime = await ModelRuntime.create({ modelsPath: null });
+  modelRuntime.registerNativeProvider(createBridgeProvider());
+
   const { session } = await createAgentSession({
     cwd: tau2Root,
     agentDir,
     model: BRIDGE_MODEL,
     thinkingLevel: "off",
     noTools: "builtin",
+    modelRuntime,
     resourceLoader,
     sessionManager: SessionManager.inMemory(tau2Root),
   });
@@ -290,6 +328,18 @@ async function createSession(command) {
           session_id: id,
           result: serializable(event.entry.data),
         });
+      } else if (event.entry.customType === "agent-r1-task-prompt") {
+        const taskId = String(event.entry.data?.task_id ?? "");
+        const prompt = String(event.entry.data?.prompt ?? "");
+        if (taskId !== process.env.TAU2_TELECOM_TASK_ID) {
+          state.extensionErrors.push(
+            `Training extension returned task ${taskId || "<empty>"}, expected ${process.env.TAU2_TELECOM_TASK_ID}`,
+          );
+        } else if (!prompt.trim()) {
+          state.extensionErrors.push("Training extension returned an empty task prompt");
+        } else {
+          state.taskPrompt = prompt;
+        }
       }
     }
   });
@@ -318,9 +368,20 @@ async function createSession(command) {
 
   emit({ type: "session_started", session_id: id, protocol_version: 2, runtime: "pi-coding-agent" });
   try {
-    await session.bindExtensions({ mode: "rpc" });
-    // The canonical extension queues its task prompt from session_start. Waiting
-    // here lets the official Pi loop consume that prompt and all follow-ups.
+    await session.bindExtensions({
+      mode: "rpc",
+      onError: (error) => state.extensionErrors.push(serializable(error)),
+    });
+    if (state.extensionErrors.length > 0) {
+      throw new Error(`Pi extension startup failed: ${JSON.stringify(state.extensionErrors)}`);
+    }
+    if (!state.taskPrompt) {
+      throw new Error("Training extension did not publish the canonical Telecom task prompt");
+    }
+    await session.prompt(state.taskPrompt, { expandPromptTemplates: true });
+    if (state.extensionErrors.length > 0) {
+      throw new Error(`Pi extension runtime failed: ${JSON.stringify(state.extensionErrors)}`);
+    }
     await session.waitForIdle();
     await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     session.dispose();

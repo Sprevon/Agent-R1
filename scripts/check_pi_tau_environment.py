@@ -106,6 +106,40 @@ def main() -> None:
         if result.returncode != 0:
             failures.append(f"Pi sidecar syntax check failed: {result.stderr.strip()}")
 
+    coding_agent_entrypoint = Path(
+        os.environ.get(
+            "PI_CODING_AGENT_ENTRYPOINT",
+            "/root/autodl-tmp/code/pi/packages/coding-agent/dist/index.js",
+        )
+    )
+    if not coding_agent_entrypoint.is_file():
+        failures.append(
+            f"PI_CODING_AGENT_ENTRYPOINT does not exist: {coding_agent_entrypoint}"
+        )
+    elif node is not None:
+        sdk_check = subprocess.run(
+            [
+                node,
+                "--input-type=module",
+                "--eval",
+                (
+                    "const sdk = await import(process.argv[1]);"
+                    "const required = ['createAgentSession', 'DefaultResourceLoader', "
+                    "'SessionManager', 'ModelRuntime'];"
+                    "const missing = required.filter((name) => typeof sdk[name] === 'undefined');"
+                    "if (missing.length) { console.error(missing.join(',')); process.exit(1); }"
+                ),
+                coding_agent_entrypoint.resolve().as_uri(),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        if sdk_check.returncode != 0:
+            failures.append(
+                "Pi coding-agent SDK exports are incomplete: "
+                f"{sdk_check.stderr.strip() or sdk_check.stdout.strip()}"
+            )
+
     try:
         import torch
 
@@ -142,4 +176,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
