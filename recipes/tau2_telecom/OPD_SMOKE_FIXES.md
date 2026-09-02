@@ -591,6 +591,20 @@ Policy mode: workflow
 
 ### 14.3 Pi 构造真实 LLM context
 
+实际代码定位（行号对应本次文档提交时的代码）：
+
+- Pi 官方 context 构造和 `streamFunction` 调用：
+  `pi/packages/agent/src/agent-loop.ts:279-310`；其中 `295-300` 组装
+  `systemPrompt + messages + tools`，`306-310` 调用实际 stream function；
+- Pi 官方 turn/tool loop：`pi/packages/agent/src/agent-loop.ts:211-243`；其中
+  `211-213` 等待 assistant response，`221-240` 提取 tool calls、执行工具并把
+  tool results 放回当前 context；
+- sidecar 将 Pi context 转成 OpenAI/Hermes message/tool schema：
+  [`pi_sidecar/src/main.mjs:72-112`](./pi_sidecar/src/main.mjs#L72-L112)；
+- sidecar 接管 Pi stream 并发出 `generation_request`：
+  [`pi_sidecar/src/main.mjs:279-318`](./pi_sidecar/src/main.mjs#L279-L318)，其中
+  `298-306` 是传给 Agent-R1 的 `messages`、`tools` 与 `anchor_obs`。
+
 Pi 官方 agent loop 从 session transcript 构造：
 
 ```ts
@@ -630,6 +644,22 @@ stream function 将 Pi message 类型转换为 OpenAI/Hermes 可消费结构：
 `messages + tools` 生成。
 
 ### 14.4 Agent-R1 执行实际模型生成
+
+实际代码定位：
+
+- Agent-R1 消费 sidecar event 的完整 generation 分支：
+  [`pi_tau_agent_flow.py:121-193`](./pi_tau_agent_flow.py#L121-L193)；
+- 读取 Pi 的 `messages/tools` 并生成 `prompt_ids`：
+  [`pi_tau_agent_flow.py:126-143`](./pi_tau_agent_flow.py#L126-L143)；
+- **真正调用 student rollout LLM** 的 `server_manager.generate()`：
+  [`pi_tau_agent_flow.py:144-148`](./pi_tau_agent_flow.py#L144-L148)；
+- 截取 response token、decode 并用 Hermes parser 提取 tool calls：
+  [`pi_tau_agent_flow.py:149-170`](./pi_tau_agent_flow.py#L149-L170)；
+- 保存 token/logprob，并将解析后的 response 回给 Pi：
+  [`pi_tau_agent_flow.py:172-193`](./pi_tau_agent_flow.py#L172-L193)；
+- `apply_chat_template(messages, tools=tools)` 的底层实现：
+  [`agent_r1/agent_flow/agent_flow.py:188-251`](../../agent_r1/agent_flow/agent_flow.py#L188-L251)，
+  其中纯 tokenizer 路径在 `237-246`，明确把同一份 `tools` 传给模型模板。
 
 Python `PiTauAgentFlow` 收到 `generation_request` 后执行：
 
