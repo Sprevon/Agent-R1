@@ -13,6 +13,10 @@ Pi              owns skills, extensions, transcript, tools, and the agent loop
 tau2            owns tasks, DB state, tool execution, and reward evaluation
 ```
 
+For the detailed Qwen3-0.6B/4B three-GPU smoke failure analysis, code fixes,
+verification evidence, and the complete Pi LLM-to-Agent-R1 call chain, see
+[OPD_SMOKE_FIXES.md](./OPD_SMOKE_FIXES.md).
+
 ## Two Agent-R1 paths
 
 Agent-R1's generic environment path is still available for other recipes:
