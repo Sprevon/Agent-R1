@@ -384,6 +384,12 @@ async function createSession(command) {
     }
     await session.waitForIdle();
     await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    if (state.extensionErrors.length > 0) {
+      throw new Error(`Pi extension shutdown failed: ${JSON.stringify(state.extensionErrors)}`);
+    }
+    if (state.evaluation === null) {
+      throw new Error("Training extension did not publish a Telecom evaluation result");
+    }
     session.dispose();
     emit({
       type: "session_complete",
